@@ -7,81 +7,99 @@ import {serializerCompiler, validatorCompiler, type ZodTypeProvider} from 'fasti
 import {z} from 'zod';
 import {orders, products} from '@/db/schema.js';
 
+// Modular availability logic
+function isProductAvailable(p: typeof products.$inferSelect, now: Date): boolean {
+    switch (p.type) {
+        case 'NORMAL':
+            return p.available > 0;
+
+        case 'SEASONAL': {
+            const restockDate = new Date(now.getTime() + p.leadTime * 86400000);
+            return p.available > 0 || restockDate <= p.seasonEndDate!;
+        }
+
+        case 'EXPIRABLE':
+            return p.available > 0 && now <= p.expiryDate!;
+    }
+
+    return false;
+}
+
+// Modular notification logic
+function getProductNotification(p: typeof products.$inferSelect, now: Date): string | null {
+    switch (p.type) {
+        case 'NORMAL':
+            return p.available === 0 ? `Produit en rupture, délai de ${p.leadTime} jours` : null;
+
+        case 'SEASONAL': {
+            const restockDate = new Date(now.getTime() + p.leadTime * 86400000);
+            if (p.available === 0 && restockDate > p.seasonEndDate!) {
+                return 'Produit saisonnier indisponible';
+            }
+            return p.available === 0 ? `Produit saisonnier en rupture, délai de ${p.leadTime} jours` : null;
+        }
+
+        case 'EXPIRABLE':
+            return now > p.expiryDate! ? 'Produit expiré' : null;
+    }
+
+    return null;
+}
+
 export const myController = fastifyPlugin(async server => {
-	// Add schema validator and serializer
-	server.setValidatorCompiler(validatorCompiler);
-	server.setSerializerCompiler(serializerCompiler);
+    server.setValidatorCompiler(validatorCompiler);
+    server.setSerializerCompiler(serializerCompiler);
 
-	server.withTypeProvider<ZodTypeProvider>().post('/orders/:orderId/processOrder', {
-		schema: {
-			params: z.object({
-				orderId: z.coerce.number(),
-			}),
-		},
-	}, async (request, reply) => {
-		const dbse = server.diContainer.resolve('db');
-		const ps = server.diContainer.resolve('ps');
-		const order = (await dbse.query.orders
-			.findFirst({
-				where: eq(orders.id, request.params.orderId),
-				with: {
-					products: {
-						columns: {},
-						with: {
-							product: true,
-						},
-					},
-				},
-			}))!;
-		console.log(order);
-		const ids: number[] = [request.params.orderId];
-		const {products: productList} = order;
+    server.withTypeProvider<ZodTypeProvider>().post('/orders/:orderId/processOrder', {
+        schema: {
+            params: z.object({
+                orderId: z.coerce.number(),
+            }),
+        },
+    }, async (request, reply) => {
+        const dbse = server.diContainer.resolve('db');
+        const ps = server.diContainer.resolve('ps');
+        const order = (await dbse.query.orders.findFirst({
+            where: eq(orders.id, request.params.orderId),
+            with: {
+                products: {
+                    columns: {},
+                    with: {
+                        product: true,
+                    },
+                },
+            },
+        }))!;
 
-		if (productList) {
-			for (const {product: p} of productList) {
-				switch (p.type) {
-					case 'NORMAL': {
-						if (p.available > 0) {
-							p.available -= 1;
-							await dbse.update(products).set(p).where(eq(products.id, p.id));
-						} else {
-							const {leadTime} = p;
-							if (leadTime > 0) {
-								await ps.notifyDelay(leadTime, p);
-							}
-						}
+        const {products: productList} = order;
+        const now = new Date(); // Centralized current date
 
-						break;
-					}
+        if (productList) {
+            for (const {product: p} of productList) {
+                const isAvailable = isProductAvailable(p, now); // Modular availability check
 
-					case 'SEASONAL': {
-						const currentDate = new Date();
-						if (currentDate > p.seasonStartDate! && currentDate < p.seasonEndDate! && p.available > 0) {
-							p.available -= 1;
-							await dbse.update(products).set(p).where(eq(products.id, p.id));
-						} else {
-							await ps.handleSeasonalProduct(p);
-						}
+                if (isAvailable) {
+                    p.available -= 1;
+                    await dbse.update(products).set(p).where(eq(products.id, p.id));
+                } else {
+                    // Use original handlers for clarity
+                    switch (p.type) {
+                        case 'NORMAL':
+                            await ps.notifyDelay(p.leadTime, p);
+                            break;
 
-						break;
-					}
+                        case 'SEASONAL':
+                            await ps.handleSeasonalProduct(p);
+                            break;
 
-					case 'EXPIRABLE': {
-						const currentDate = new Date();
-						if (p.available > 0 && p.expiryDate! > currentDate) {
-							p.available -= 1;
-							await dbse.update(products).set(p).where(eq(products.id, p.id));
-						} else {
-							await ps.handleExpiredProduct(p);
-						}
+                        case 'EXPIRABLE':
+                            await ps.handleExpiredProduct(p);
+                            break;
+                    }
+                }
+            }
+        }
 
-						break;
-					}
-				}
-			}
-		}
-
-		await reply.send({orderId: order.id});
-	});
+        await reply.send({orderId: order.id});
+    });
 });
-

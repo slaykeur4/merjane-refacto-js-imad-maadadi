@@ -19,7 +19,7 @@ export type Product = typeof products.$inferSelect;
 export type ProductInsert = typeof products.$inferInsert;
 
 export const orders = sqliteTable('orders', {
-	id: integer('id').notNull().primaryKey(),
+	id: integer('id').notNull().primaryKey({ autoIncrement: true }),
 });
 
 export type Order = typeof orders.$inferSelect;
