@@ -1,7 +1,8 @@
 import {rm} from 'node:fs/promises';
+import path from 'path';
 import {exec as execCallback} from 'node:child_process';
 import {promisify} from 'node:util';
-import SqliteDatabase from 'better-sqlite3';
+import SqliteDatabase, { Database } from 'better-sqlite3';
 import {drizzle} from 'drizzle-orm/better-sqlite3';
 import {
 	uniqueNamesGenerator, adjectives, colors, animals,
@@ -18,8 +19,23 @@ export async function cleanAllLooseDatabases(prefix: string) {
 	await Promise.all(entries.map(async entry => cleanUp(entry)));
 }
 
-export async function cleanUp(databaseName: string) {
-	await rm(databaseName, {force: true});
+export async function cleanUp(databaseName: string, db?: Database) {
+	// Added logic to close DB connection if provided
+    // Close DB connection if provided
+    if (db && typeof db.close === 'function') {
+        await db.close();
+    }
+
+    // Wait briefly to ensure file lock is released (Windows workaround)
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    // Delete the DB file
+    const dbPath = path.resolve(process.cwd(), `${databaseName}.db`);
+    try {
+        await rm(dbPath, {force: true});
+    } catch (err) {
+        console.warn(`Failed to delete test DB: ${dbPath}`, err);
+    }
 }
 
 export async function createDatabaseMock() {

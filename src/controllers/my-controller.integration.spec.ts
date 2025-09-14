@@ -36,21 +36,38 @@ describe('MyController Integration Tests', () => {
 		await fastify.close();
 	});
 
+	// Updated test to make transaction synchronous
 	it('ProcessOrderShouldReturn', async () => {
 		const client = supertest(fastify.server);
 		const allProducts = createProducts();
-		const orderId = await database.transaction(async tx => {
-			const productList = await tx.insert(products).values(allProducts).returning({productId: products.id});
-			const [order] = await tx.insert(orders).values([{}]).returning({orderId: orders.id});
-			await tx.insert(ordersToProducts).values(productList.map(p => ({orderId: order!.orderId, productId: p.productId})));
-			return order!.orderId;
+
+		// Insert products and order outside the transaction
+		const productList = await database.insert(products).values(allProducts).returning({ productId: products.id });
+		const [order] = await database.insert(orders).values([{}]).returning({ orderId: orders.id });
+
+		// Link products to order inside a synchronous transaction
+		database.transaction(tx => {
+			tx.insert(ordersToProducts).values(
+				productList.map(p => ({
+					orderId: order.orderId,
+					productId: p.productId,
+				}))
+			);
 		});
 
-		await client.post(`/orders/${orderId}/processOrder`).expect(200).expect('Content-Type', /application\/json/);
+		// Process the order via HTTP
+		await client
+			.post(`/orders/${order.orderId}/processOrder`)
+			.expect(200)
+			.expect('Content-Type', /application\/json/);
 
-		const resultOrder = await database.query.orders.findFirst({where: eq(orders.id, orderId)});
-		expect(resultOrder!.id).toBe(orderId);
+		// Validate the order was processed
+		const resultOrder = await database.query.orders.findFirst({
+			where: eq(orders.id, order.orderId),
+		});
+		expect(resultOrder!.id).toBe(order.orderId);
 	});
+
 
 	function createProducts(): ProductInsert[] {
 		const d = 24 * 60 * 60 * 1000;
